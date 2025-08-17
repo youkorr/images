@@ -8,8 +8,17 @@ import re
 
 from PIL import Image, UnidentifiedImageError
 
-import esphome.codegen as cg
+import hashlib
+import io
+import logging
+from pathlib import Path
+import re
+
+from PIL import Image, UnidentifiedImageError
+
 from esphome import core, external_files
+import esphome.codegen as cg
+from esphome.components.const import CONF_BYTE_ORDER
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_DEFAULTS,
@@ -29,6 +38,7 @@ from esphome.core import CORE, HexInt
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "image"
+# NOTE: sd_mmc_card dépendance conditionnelle - sera ajoutée automatiquement si nécessaire
 DEPENDENCIES = ["display"]
 
 # Configuration pour la liaison avec sd_mmc_card
@@ -100,6 +110,12 @@ class ImageEncoder:
     def encode(self, pixel):
         """
         Encode a single pixel
+        """
+
+    def end_row(self):
+        """
+        Marks the end of a pixel row
+        :return:
         """
 
 
@@ -260,6 +276,58 @@ class ImageRGB(ImageEncoder):
             self.index += 1
 
 
+class ReplaceWith:
+    """
+    Placeholder class to provide feedback on deprecated features
+    """
+
+    allow_config = {CONF_ALPHA_CHANNEL, CONF_CHROMA_KEY, CONF_OPAQUE}
+
+    def __init__(self, replace_with):
+        self.replace_with = replace_with
+
+    def validate(self, value):
+        raise cv.Invalid(
+            f"Image type {value} is removed; replace with {self.replace_with}"
+        )
+
+
+IMAGE_TYPE = {
+    "BINARY": ImageBinary,
+    "GRAYSCALE": ImageGrayscale,
+    "RGB565": ImageRGB565,
+    "RGB": ImageRGB,
+    "TRANSPARENT_BINARY": ReplaceWith("'type: BINARY' and 'transparency: chroma_key'"),
+    "RGB24": ReplaceWith("'type: RGB'"),
+    "RGBA": ReplaceWith("'type: RGB' and 'transparency: alpha_channel'"),
+}
+
+TransparencyType = image_ns.enum("TransparencyType")
+
+CONF_TRANSPARENCY = "transparency"
+
+# If the MDI file cannot be downloaded within this time, abort.
+IMAGE_DOWNLOAD_TIMEOUT = 30  # seconds
+
+SOURCE_LOCAL = "local"
+SOURCE_WEB = "web"
+SOURCE_SD_CARD = "sd_card"
+
+SOURCE_MDI = "mdi"
+SOURCE_MDIL = "mdil"
+SOURCE_MEMORY = "memory"
+
+MDI_SOURCES = {
+    SOURCE_MDI: "https://raw.githubusercontent.com/Templarian/MaterialDesign/master/svg/",
+    SOURCE_MDIL: "https://raw.githubusercontent.com/Pictogrammers/MaterialDesignLight/refs/heads/master/svg/",
+    SOURCE_MEMORY: "https://raw.githubusercontent.com/Pictogrammers/Memory/refs/heads/main/src/svg/",
+}
+
+Image_ = image_ns.class_("Image")
+
+INSTANCE_TYPE = Image_
+
+
 def compute_local_image_path(value) -> Path:
     url = value[CONF_URL] if isinstance(value, dict) else value
     h = hashlib.new("sha256")
@@ -279,17 +347,25 @@ def sd_card_path(value):
     value = value[CONF_PATH] if isinstance(value, dict) else value
     # Supprime un éventuel slash en début pour éviter les doublons
     value = value.lstrip("/\\")
-    full_path = "sd://" + value  # Conserve le préfixe 'sd://'
+    full_path = "/" + value  # chemin à partir de la racine de la SD
     _LOGGER.info(f"Chemin SD résolu: {full_path}")
     return full_path
-
 
 def is_sd_card_path(path_str: str) -> bool:
     """Check if a path is an SD card path"""
     if not isinstance(path_str, str):
         return False
     path_str = path_str.strip()
-    return path_str.startswith("sd://")
+    return (
+        path_str.startswith("sd_card/") or 
+        path_str.startswith("sd_card//") or
+        path_str.startswith("/sdcard/") or
+        path_str.startswith("sdcard/") or
+        path_str.startswith("//") or
+        path_str.startswith("/sd/") or
+        path_str.startswith("sd/")
+    )
+
 
 
 def download_file(url, path):
@@ -340,12 +416,12 @@ def validate_cairosvg_installed():
 
 def validate_file_shorthand(value):
     value = cv.string_strict(value)
-
-    # Vérification pour les chemins SD card
+    
+    # Vérification pour les chemins SD card - VERSION CORRIGÉE
     if is_sd_card_path(value):
         _LOGGER.info(f"SD card image detected: {value}")
         return value  # Retourne le chemin tel quel pour SD card
-
+    
     parts = value.strip().split(":")
     if len(parts) == 2 and parts[0] in MDI_SOURCES:
         match = re.match(r"^[a-zA-Z0-9\-]+$", parts[1])
@@ -452,12 +528,12 @@ def validate_settings(value):
         )
     if file := value.get(CONF_FILE):
         file_path = str(file)
-
+        
         # Pour les fichiers SD card, on évite la validation locale
         if is_sd_card_path(file_path):
             _LOGGER.info(f"SD card image configured: {file_path}")
             return value
-
+            
         file = Path(file)
         if is_svg_file(file):
             validate_cairosvg_installed()
@@ -487,6 +563,7 @@ OPTIONS_SCHEMA = {
     cv.Optional(CONF_BYTE_ORDER): cv.one_of("BIG_ENDIAN", "LITTLE_ENDIAN", upper=True),
     cv.Optional(CONF_TRANSPARENCY, default=CONF_OPAQUE): validate_transparency(),
     cv.Optional(CONF_TYPE): validate_type(IMAGE_TYPE),
+    
 }
 
 OPTIONS = [key.schema for key in OPTIONS_SCHEMA]
@@ -578,7 +655,7 @@ def typed_image_schema(image_type):
                 }
             )
         ),
-    )
+    ) 
 
 
 def _config_schema(config):
@@ -607,6 +684,101 @@ def _config_schema(config):
 CONFIG_SCHEMA = _config_schema
 
 
+def normalize_to_sd_path(path: str) -> str:
+    """
+    Normalise le chemin vers un format unifié pour la carte SD.
+    Cette fonction génère maintenant les métadonnées pour la recherche automatique.
+    """
+    p = str(path).strip()
+    p = p.replace("\\", "/")
+    # collapse multiple slashes
+    p = re.sub(r"/+", "/", p)
+    
+    # Nettoie et normalise le chemin
+    if p.startswith("/sd_card/"):
+        rest = p[9:]  # Enlever "/sd_card/"
+        normalized = "/" + rest
+    elif p.startswith("sd_card/"):
+        rest = p[8:]  # Enlever "sd_card/"
+        normalized = "/" + rest
+    elif p.startswith("/sdcard/"):
+        rest = p[8:]  # Enlever "/sdcard/"
+        normalized = "/" + rest
+    elif p.startswith("sdcard/"):
+        rest = p[7:]  # Enlever "sdcard/"
+        normalized = "/" + rest
+    elif not p.startswith("/"):
+        normalized = "/" + p
+    else:
+        normalized = p
+    
+    _LOGGER.info(f"Chemin SD normalisé: {path} -> {normalized}")
+    return normalized
+
+
+def generate_sd_search_paths(original_path: str) -> list:
+    """
+    Génère une liste de chemins de recherche possibles pour la carte SD.
+    Cette fonction sera utilisée par le runtime C++ pour trouver automatiquement
+    la racine de la carte SD.
+    """
+    normalized = normalize_to_sd_path(original_path)
+    filename = Path(normalized).name
+    parent_dirs = Path(normalized).parent.parts[1:]  # Skip root '/'
+    
+    search_paths = []
+    
+    # Chemin normalisé exact
+    search_paths.append(normalized)
+    
+    # Variations communes de montage SD
+    common_roots = ["/sd", "/sdcard", "/mnt/sd", "/mnt/sdcard", "/media/sd"]
+    for root in common_roots:
+        if parent_dirs:
+            search_paths.append(f"{root}/" + "/".join(parent_dirs) + f"/{filename}")
+        else:
+            search_paths.append(f"{root}/{filename}")
+    
+    # Recherche dans le répertoire racine direct
+    search_paths.append(f"/{filename}")
+    
+    # Recherche relative
+    if parent_dirs:
+        search_paths.append("/".join(parent_dirs) + f"/{filename}")
+    search_paths.append(filename)
+    
+    _LOGGER.info(f"Chemins de recherche SD générés pour {original_path}: {search_paths}")
+    return search_paths
+
+
+def try_resolve_local_candidate(orig_path: str, sd_path: str) -> Path | None:
+    """
+    Attempt to find a local copy inside the project dir for build-time processing.
+    """
+    candidates = []
+    try:
+        candidates.append(Path(CORE.relative_config_path(sd_path.lstrip("/"))))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(CORE.relative_config_path(orig_path.lstrip("/"))))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(CORE.relative_config_path("sd_card/" + Path(sd_path).name)))
+    except Exception:
+        pass
+    try:
+        candidates.append(Path(CORE.relative_config_path("sdcard/" + Path(sd_path).name)))
+    except Exception:
+        pass
+
+    for c in candidates:
+        if c and c.is_file():
+            return c
+    return None
+
+
 async def write_image(config, all_frames=False):
     """Fonction principale de traitement des images."""
     path_str = config[CONF_FILE]
@@ -614,22 +786,23 @@ async def write_image(config, all_frames=False):
     # Détecte si c'est une image de la carte SD
     if is_sd_card_path(path_str):
         _LOGGER.info(f"Traitement d'une image SD: {path_str}")
-        sd_path = sd_card_path(path_str)
-
+        sd_path = normalize_to_sd_path(path_str)
+        search_paths = generate_sd_search_paths(path_str)
+        
         # Gestion du resize - OBLIGATOIRE pour les images SD
         if CONF_RESIZE not in config:
             raise cv.Invalid(
                 f"Le paramètre 'resize' est obligatoire pour les images de carte SD. "
                 f"Spécifiez 'resize: WIDTHxHEIGHT' pour l'image {path_str}"
             )
-
+        
         width, height = config[CONF_RESIZE]
         type = config[CONF_TYPE]
         transparency = config[CONF_TRANSPARENCY]
         invert_alpha = config[CONF_INVERT_ALPHA]
-
+        
         _LOGGER.info(f"Image SD configurée: {path_str} -> {width}x{height}")
-
+        
         def calculate_buffer_size(w, h, img_type, trans):
             """Calcule la taille du buffer pour une configuration donnée"""
             if img_type == "RGB565":
@@ -643,150 +816,35 @@ async def write_image(config, all_frames=False):
             else:
                 bpp = 3  # Par défaut RGB
             return w * h * bpp
-
+        
         # Calcul de la taille du buffer
         buffer_size = calculate_buffer_size(width, height, type, transparency)
-
+        
         # Validation de la taille - permet des images plus grandes pour ESP32-S3/P4 avec PSRAM
         max_buffer_size = 8 * 1024 * 1024  # 8MB max - ajustable selon votre ESP32
-
+        
         # Avertissement pour les grosses images mais pas d'erreur bloquante
         if buffer_size > 4 * 1024 * 1024:  # > 4MB
             _LOGGER.warning(
                 f"Image SD {path_str}: buffer très grand ({buffer_size / (1024*1024):.1f} MB). "
                 f"Assurez-vous que votre ESP32 a assez de PSRAM."
             )
-
+        
         if buffer_size > max_buffer_size:
             raise cv.Invalid(
                 f"Image SD {path_str}: buffer trop grand ({buffer_size} bytes). "
                 f"Maximum autorisé: {max_buffer_size} bytes. "
                 f"Réduisez la taille avec resize: ou changez le format."
             )
-
+        
         # Crée un buffer de la bonne taille rempli de zéros
-        # Ceci est un placeholder - l'image réelle sera chargée au runtime
         placeholder_data = [0] * buffer_size
-
+        
         # Configuration de l'encoder pour les métadonnées
-        encoder = IMAGE_TYPE[type](width, height, transparency,
-                                   Image.Dither.NONE, invert_alpha)
-
-        if byte_order := config.get(CONF_BYTE_ORDER):
-            if hasattr(encoder, "set_big_endian"):
-                encoder.set_big_endian(byte_order == "BIG_ENDIAN")
-                _LOGGER.info(f"Configuration byte_order pour {path_str}: {byte_order}")
-
-        rhs = [HexInt(x) for x in placeholder_data]
-        prog_arr = cg.progmem_array(config[CONF_RAW_DATA_ID], rhs)
-        image_type = get_image_type_enum(type)
-        trans_value = get_transparency_enum(transparency)
-
-        _LOGGER.info(f"""Configuration de l'image SD:
-            - Fichier: {sd_path}
-            - Dimensions: {width}x{height}
-            - Type: {type}
-            - Transparence: {transparency}
-            - Buffer size: {buffer_size} bytes ({buffer_size / 1024:.1f} KB)
-        """)
-
-        return prog_arr, width, height, image_type, trans_value, 1, True, sd_path
-
-    # Code existant pour les images normales (non-SD)
-    path = Path(path_str)
-    if not path.is_file():
-        raise core.EsphomeError(f"Impossible de charger le fichier image {path}")
-
-    resize = config.get(CONF_RESIZE)
-    if is_svg_file(path):
-        from cairosvg import svg2png
-        if not resize:
-            resize = (None, None)
-        with open(path, "rb") as file:
-            image = svg2png(
-                file_obj=file,
-                output_width=resize[0],
-                output_height=resize[1],
-            )
-        image = Image.open(io.BytesIO(image))
-        width, height = image.size
-    else:
-        image = Image.open(path)
-        width, height = image.size
-        if resize:
-            ratio = min(
-                min(width, resize[0]) / width,
-                min(height, resize[1]) / height
-            )
-            width, height = int(width * ratio), int(height * ratio)
-
-    if not resize and (width > 500 or height > 500):
-        _LOGGER.warning(
-            'L\'image "%s" est très grande. Considérez utiliser le paramètre resize.',
-            path,
-        )
-
-    dither = (
-        Image.Dither.NONE
-        if config[CONF_DITHER] == "NONE"
-        else Image.Dither.FLOYDSTEINBERG
-    )
-    type = config[CONF_TYPE]
-    transparency = config[CONF_TRANSPARENCY]
-    invert_alpha = config[CONF_INVERT_ALPHA]
-    frame_count = 1
-
-    if all_frames:
-        try:
-            frame_count = image.n_frames
-        except AttributeError:
-            pass
-        if frame_count <= 1:
-            _LOGGER.warning("Le fichier image %s n'a pas de frames d'animation", path)
-
-    total_rows = height * frame_count
-    encoder = IMAGE_TYPE[type](width, total_rows, transparency, dither, invert_alpha)
-
-    if byte_order := config.get(CONF_BYTE_ORDER):
-        if hasattr(encoder, "set_big_endian"):
-            encoder.set_big_endian(byte_order == "BIG_ENDIAN")
-
-    for frame_index in range(frame_count):
-        image.seek(frame_index)
-        pixels = encoder.convert(image.resize((width, height)), path).getdata()
-        for row in range(height):
-            for col in range(width):
-                encoder.encode(pixels[row * width + col])
-            encoder.end_row()
-
-    rhs = [HexInt(x) for x in encoder.data]
-    prog_arr = cg.progmem_array(config[CONF_RAW_DATA_ID], rhs)
-    image_type = get_image_type_enum(type)
-    trans_value = get_transparency_enum(transparency)
-
-    return prog_arr, width, height, image_type, trans_value, frame_count, False, None
-
-
-async def to_code(config):
-    if isinstance(config, list):
-        for entry in config:
-            await to_code(entry)
-    elif CONF_ID not in config:
-        for entry in config.values():
-            await to_code(entry)
-    else:
-        prog_arr, width, height, image_type, trans_value, _, sd_runtime, sd_path = await write_image(config)
-
-        var = cg.new_Pvariable(config[CONF_ID], prog_arr, width, height, image_type, trans_value)
-
-        # Si image configurée pour lecture runtime depuis la SD
-        if sd_runtime:
-            cg.add(var.set_sd_path(sd_path))
-            cg.add(var.set_sd_runtime(True))
-            _LOGGER.info(f"Image {config[CONF_ID]} configured for SD card runtime loading: {sd_path}")
-
-            # Ajouter seulement le define nécessaire
-            cg.add_define("USE_SD_CARD_IMAGES")
+        encoder = IMAGE_TYPE[type](width, height, transparency, 
+                                 Image.Dither.NONE, invert_alpha)
+        
+        if byte_order := config.get
 
 
 
