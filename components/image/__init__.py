@@ -1296,73 +1296,7 @@ def detect_sd_mount_points():
     return available_mounts
 
 
-def generate_yaml_example():
-    """
-    Génère un exemple de configuration YAML qui évite complètement la flash memory
-    """
-    return """
-# Configuration ESPHome pour images SD sans utilisation de flash memory
 
-# Composant SD card requis
-sd_mmc_card:
-  clk_pin: GPIO14
-  cmd_pin: GPIO15  
-  data_pins: [GPIO2, GPIO4, GPIO12, GPIO13]
-
-# Images stockées uniquement sur SD - AUCUNE donnée en flash !
-image:
-  # Image simple depuis SD
-  - id: photo_sd
-    file: "sd_card/photos/vacances.jpg"
-    resize: 320x240            # OBLIGATOIRE pour SD
-    type: RGB565               # Format optimisé
-    transparency: opaque
-    
-  # Image avec transparency
-  - id: icon_sd  
-    file: "sd_card/icons/warning.png"
-    resize: 64x64
-    type: RGB565
-    transparency: chroma_key
-    
-  # Image monochrome optimisée
-  - id: logo_sd
-    file: "sd_card/logos/company.png"  
-    resize: 128x64
-    type: BINARY
-    transparency: opaque
-
-display:
-  - platform: ili9341
-    # ... configuration display
-    lambda: |-
-      // Les images sont chargées automatiquement depuis la SD
-      // Aucune donnée stockée en flash memory !
-      it.image(10, 10, id(photo_sd));   // Charge depuis SD si nécessaire
-      it.image(50, 50, id(icon_sd));    // Auto-détection du point de montage
-      it.image(0, 0, id(logo_sd));      // Buffer alloué dynamiquement
-"""
-
-
-# Fonction d'entrée principale pour ESPHome
-async def to_code(config):
-    """
-    Fonction principale appelée par ESPHome pour générer le code.
-    Traite chaque image selon son type (locale ou SD).
-    """
-    # Validation globale pour éviter l'usage de flash memory
-    validate_no_flash_memory_usage(config)
-    
-    # Traite chaque image configurée
-    for image_config in config:
-        var = await write_image(image_config)
-        if var:
-            _LOGGER.info(f"Image générée: {image_config[CONF_ID]}")
-
-
-# Configuration pour le type d'instance ESPHome
-CODEOWNERS = ["@esphome/core"]
-DEPENDENCIES = ["display"]
 
 
 
