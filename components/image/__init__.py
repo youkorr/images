@@ -1268,33 +1268,6 @@ def validate_no_flash_memory_usage(config):
     return config
 
 
-def detect_sd_mount_points():
-    """
-    Fonction utilitaire pour détecter les points de montage SD disponibles.
-    Utilisée pour le debugging et la documentation.
-    """
-    import os
-    
-    possible_mounts = [
-        "/sdcard", "/sd", "/mnt/sd", "/mnt/sdcard", 
-        "/media/sd", "/mnt", "/"
-    ]
-    
-    available_mounts = []
-    for mount in possible_mounts:
-        if os.path.exists(mount) and os.path.isdir(mount):
-            try:
-                # Test d'accès en lecture
-                os.listdir(mount)
-                available_mounts.append(mount)
-            except PermissionError:
-                # Point de montage existe mais pas d'accès
-                available_mounts.append(f"{mount} (no access)")
-            except Exception:
-                continue
-    
-    return available_mounts
-
 
 
 
