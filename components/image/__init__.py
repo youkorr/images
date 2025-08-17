@@ -779,6 +779,416 @@ static const char* {config[CONF_ID]}_sd_search_paths[] = {{{search_paths_str}, n
         return await write_local_image(config, all_frames)
 
 
+async def write_local_image(config, all_frames=False):
+    """
+    Traitement des images locales (non-SD) - code original adapté
+    """
+    path = config[CONF_FILE]
+    
+    try:
+        resize = config.get(CONF_RESIZE)
+        if is_svg_file(path):
+            validate_cairosvg_installed()
+            import cairosvg
+            
+            if resize:
+                req_width, req_height = resize
+                svg_image = cairosvg.svg2png(
+                    url=path, output_width=req_width, output_height=req_height
+                )
+            else:
+                svg_image = cairosvg.svg2png(url=path)
+            image = Image.open(io.BytesIO(svg_image))
+        else:
+            image = Image.open(path)
+            if resize:
+                image = image.resize(resize)
+        
+        frames = []
+        if all_frames and hasattr(image, 'n_frames'):
+            try:
+                for frame_index in range(image.n_frames):
+                    image.seek(frame_index)
+                    frame = image.copy()
+                    frames.append(frame)
+            except Exception as e:
+                _LOGGER.warning(f"Erreur lors de l'extraction des frames: {e}")
+                frames = [image]
+        else:
+            frames = [image]
+        
+        # Traitement de chaque frame
+        encoded_frames = []
+        for frame in frames:
+            width, height = frame.size
+            if config[CONF_TYPE] == "GRAYSCALE":
+                if frame.mode == "LA":
+                    pass  # OK
+                elif frame.mode in ("RGBA", "RGB"):
+                    frame = frame.convert("LA")
+                else:
+                    frame = frame.convert("L").convert("LA")
+            elif frame.mode != "RGBA":
+                frame = frame.convert("RGBA")
+                
+            # Configuration de l'encoder
+            encoder = IMAGE_TYPE[config[CONF_TYPE]](
+                width,
+                height,
+                config[CONF_TRANSPARENCY],
+                getattr(Image.Dither, config[CONF_DITHER]),
+                config[CONF_INVERT_ALPHA]
+            )
+            
+            if byte_order := config.get(CONF_BYTE_ORDER):
+                if hasattr(encoder, 'set_big_endian'):
+                    encoder.set_big_endian(byte_order == "BIG_ENDIAN")
+            
+            encoder.convert(frame, path)
+            
+            # Encodage des pixels
+            for y in range(height):
+                for x in range(width):
+                    encoder.encode(frame.getpixel((x, y)))
+                encoder.end_row()
+            
+            encoded_frames.append(encoder.data)
+        
+        # Concaténation des frames si multiple
+        if len(encoded_frames) > 1:
+            all_data = []
+            for frame_data in encoded_frames:
+                all_data.extend(frame_data)
+            data = all_data
+        else:
+            data = encoded_frames[0]
+        
+        # Génération du code C++
+        rhs = [HexInt(x) for x in data]
+        prog_arr = cg.progmem_array(config[CONF_RAW_DATA_ID], rhs)
+        
+        var = cg.new_Pvariable(
+            config[CONF_ID],
+            prog_arr,
+            encoder.width,
+            encoder.height,
+            len(encoded_frames),
+            get_image_type_enum(config[CONF_TYPE])
+        )
+        
+        return var
+        
+    except Exception as e:
+        _LOGGER.error(f"Erreur lors du traitement de l'image {path}: {e}")
+        raise cv.Invalid(f"Impossible de traiter l'image: {e}")
+
+
+LOCAL_SCHEMA = cv.All(
+    {
+        cv.Required(CONF_PATH): cv.file_,
+    },
+    local_path,
+)
+
+# Ajout du schéma SD card
+SD_CARD_SCHEMA = cv.All(
+    {
+        cv.Required(CONF_PATH): cv.string,
+    },
+    sd_card_path,
+)
+
+
+def mdi_schema(source):
+    def validate_mdi(value):
+        return download_gh_svg(value, source)
+
+    return cv.All(
+        cv.Schema(
+            {
+                cv.Required(CONF_ICON): cv.string,
+            }
+        ),
+        validate_mdi,
+    )
+
+
+WEB_SCHEMA = cv.All(
+    {
+        cv.Required(CONF_URL): cv.string,
+    },
+    download_image,
+)
+
+
+TYPED_FILE_SCHEMA = cv.typed_schema(
+    {
+        SOURCE_LOCAL: LOCAL_SCHEMA,
+        SOURCE_WEB: WEB_SCHEMA,
+        SOURCE_SD_CARD: SD_CARD_SCHEMA,  # Ajout du schéma SD card
+    }
+    | {source: mdi_schema(source) for source in MDI_SOURCES},
+    key=CONF_SOURCE,
+)
+
+
+def validate_transparency(choices=TRANSPARENCY_TYPES):
+    def validate(value):
+        if isinstance(value, bool):
+            value = str(value)
+        return cv.one_of(*choices, lower=True)(value)
+
+    return validate
+
+
+def validate_type(image_types):
+    def validate(value):
+        value = cv.one_of(*image_types, upper=True)(value)
+        return IMAGE_TYPE[value].validate(value)
+
+    return validate
+
+
+def validate_settings(value):
+    """
+    Validate the settings for a single image configuration.
+    """
+    conf_type = value[CONF_TYPE]
+    type_class = IMAGE_TYPE[conf_type]
+    transparency = value[CONF_TRANSPARENCY].lower()
+    if transparency not in type_class.allow_config:
+        raise cv.Invalid(
+            f"Image format '{conf_type}' cannot have transparency: {transparency}"
+        )
+    invert_alpha = value.get(CONF_INVERT_ALPHA, False)
+    if (
+        invert_alpha
+        and transparency != CONF_ALPHA_CHANNEL
+        and CONF_INVERT_ALPHA not in type_class.allow_config
+    ):
+        raise cv.Invalid("No alpha channel to invert")
+    if value.get(CONF_BYTE_ORDER) is not None and not callable(
+        getattr(type_class, "set_big_endian", None)
+    ):
+        raise cv.Invalid(
+            f"Image format '{conf_type}' does not support byte order configuration"
+        )
+    if file := value.get(CONF_FILE):
+        file_path = str(file)
+        
+        # Pour les fichiers SD card, on évite la validation locale
+        if is_sd_card_path(file_path):
+            _LOGGER.info(f"SD card image configured: {file_path}")
+            return value
+            
+        file = Path(file)
+        if is_svg_file(file):
+            validate_cairosvg_installed()
+        else:
+            try:
+                Image.open(file)
+            except UnidentifiedImageError as exc:
+                raise cv.Invalid(
+                    f"File can't be opened as image: {file.absolute()}"
+                ) from exc
+    return value
+
+
+IMAGE_ID_SCHEMA = {
+    cv.Required(CONF_ID): cv.declare_id(Image_),
+    cv.Required(CONF_FILE): cv.Any(validate_file_shorthand, TYPED_FILE_SCHEMA),
+    cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
+}
+
+
+OPTIONS_SCHEMA = {
+    cv.Optional(CONF_RESIZE): cv.dimensions,
+    cv.Optional(CONF_DITHER, default="NONE"): cv.one_of(
+        "NONE", "FLOYDSTEINBERG", upper=True
+    ),
+    cv.Optional(CONF_INVERT_ALPHA, default=False): cv.boolean,
+    cv.Optional(CONF_BYTE_ORDER): cv.one_of("BIG_ENDIAN", "LITTLE_ENDIAN", upper=True),
+    cv.Optional(CONF_TRANSPARENCY, default=CONF_OPAQUE): validate_transparency(),
+    cv.Optional(CONF_TYPE): validate_type(IMAGE_TYPE),
+}
+
+OPTIONS = [key.schema for key in OPTIONS_SCHEMA]
+
+# image schema with no defaults, used with `CONF_IMAGES` in the config
+IMAGE_SCHEMA_NO_DEFAULTS = {
+    **IMAGE_ID_SCHEMA,
+    **{cv.Optional(key): OPTIONS_SCHEMA[key] for key in OPTIONS},
+}
+
+BASE_SCHEMA = cv.Schema(
+    {
+        **IMAGE_ID_SCHEMA,
+        **OPTIONS_SCHEMA,
+    }
+).add_extra(validate_settings)
+
+IMAGE_SCHEMA = BASE_SCHEMA.extend(
+    {
+        cv.Required(CONF_TYPE): validate_type(IMAGE_TYPE),
+    }
+)
+
+
+def validate_defaults(value):
+    """
+    Validate the options for images with defaults
+    """
+    defaults = value[CONF_DEFAULTS]
+    result = []
+    for index, image in enumerate(value[CONF_IMAGES]):
+        type = image.get(CONF_TYPE, defaults.get(CONF_TYPE))
+        if type is None:
+            raise cv.Invalid(
+                "Type is required either in the image config or in the defaults",
+                path=[CONF_IMAGES, index],
+            )
+        type_class = IMAGE_TYPE[type]
+        # A default byte order should be simply ignored if the type does not support it
+        available_options = [*OPTIONS]
+        if (
+            not callable(getattr(type_class, "set_big_endian", None))
+            and CONF_BYTE_ORDER not in image
+        ):
+            available_options.remove(CONF_BYTE_ORDER)
+        config = {
+            **{key: image.get(key, defaults.get(key)) for key in available_options},
+            **{key.schema: image[key.schema] for key in IMAGE_ID_SCHEMA},
+        }
+        validate_settings(config)
+        result.append(config)
+    return result
+
+
+def typed_image_schema(image_type):
+    """
+    Construct a schema for a specific image type, allowing transparency options
+    """
+    return cv.Any(
+        cv.Schema(
+            {
+                cv.Optional(t.lower()): cv.ensure_list(
+                    BASE_SCHEMA.extend(
+                        {
+                            cv.Optional(
+                                CONF_TRANSPARENCY, default=t
+                            ): validate_transparency((t,)),
+                            cv.Optional(CONF_TYPE, default=image_type): validate_type(
+                                (image_type,)
+                            ),
+                        }
+                    )
+                )
+                for t in IMAGE_TYPE[image_type].allow_config.intersection(
+                    TRANSPARENCY_TYPES
+                )
+            }
+        ),
+        # Allow a default configuration with no transparency preselected
+        cv.ensure_list(
+            BASE_SCHEMA.extend(
+                {
+                    cv.Optional(
+                        CONF_TRANSPARENCY, default=CONF_OPAQUE
+                    ): validate_transparency(),
+                    cv.Optional(CONF_TYPE, default=image_type): validate_type(
+                        (image_type,)
+                    ),
+                }
+            )
+        ),
+    ) 
+
+
+def _config_schema(config):
+    if isinstance(config, list):
+        return cv.Schema([IMAGE_SCHEMA])(config)
+    if not isinstance(config, dict):
+        raise cv.Invalid(
+            "Badly formed image configuration, expected a list or a dictionary"
+        )
+    if CONF_DEFAULTS in config or CONF_IMAGES in config:
+        return validate_defaults(
+            cv.Schema(
+                {
+                    cv.Required(CONF_DEFAULTS): OPTIONS_SCHEMA,
+                    cv.Required(CONF_IMAGES): cv.ensure_list(IMAGE_SCHEMA_NO_DEFAULTS),
+                }
+            )(config)
+        )
+    if CONF_ID in config or CONF_FILE in config:
+        return cv.ensure_list(IMAGE_SCHEMA)([config])
+    return cv.Schema(
+        {cv.Optional(t.lower()): typed_image_schema(t) for t in IMAGE_TYPE}
+    )(config)
+
+
+CONFIG_SCHEMA = _config_schema
+
+
+def validate_no_flash_memory_usage(config):
+    """
+    Valide qu'aucune donnée d'image SD ne sera stockée en flash memory.
+    Cette fonction s'assure que toutes les images SD sont configurées 
+    pour éviter complètement l'utilisation de la flash.
+    """
+    for image_config in config:
+        if is_sd_card_path(image_config.get(CONF_FILE, "")):
+            # Vérification que resize est obligatoire
+            if CONF_RESIZE not in image_config:
+                raise cv.Invalid(
+                    f"Les images SD doivent spécifier 'resize:' pour éviter "
+                    f"l'utilisation de la flash memory. Image: {image_config[CONF_FILE]}"
+                )
+            
+            # Vérification que le type est compatible avec le chargement dynamique
+            img_type = image_config.get(CONF_TYPE)
+            if img_type in ["TRANSPARENT_BINARY", "RGB24", "RGBA"]:
+                raise cv.Invalid(
+                    f"Type d'image '{img_type}' non supporté pour les images SD. "
+                    f"Utilisez RGB565, RGB, GRAYSCALE ou BINARY."
+                )
+            
+            _LOGGER.info(
+                f"✓ Image SD validée (pas de flash memory): {image_config[CONF_FILE]} "
+                f"-> {image_config[CONF_RESIZE]} en {img_type}"
+            )
+    
+    return config
+
+
+def detect_sd_mount_points():
+    """
+    Fonction utilitaire pour détecter les points de montage SD disponibles.
+    Utilisée pour le debugging et la documentation.
+    """
+    import os
+    
+    possible_mounts = [
+        "/sdcard", "/sd", "/mnt/sd", "/mnt/sdcard", 
+        "/media/sd", "/mnt", "/"
+    ]
+    
+    available_mounts = []
+    for mount in possible_mounts:
+        if os.path.exists(mount) and os.path.isdir(mount):
+            try:
+                # Test d'accès en lecture
+                os.listdir(mount)
+                available_mounts.append(mount)
+            except PermissionError:
+                # Point de montage existe mais pas d'accès
+                available_mounts.append(f"{mount} (no access)")
+            except Exception:
+                continue
+    
+    return available_mounts
+
+
 
 
 
