@@ -362,22 +362,86 @@ def is_sd_card_path(path_str: str) -> bool:
 
 
 def download_file(url, path):
-    external_files.download_content(url, path, IMAGE_DOWNLOAD_TIMEOUT)
-    return str(path)
+    """
+    Télécharge un fichier avec validation améliorée
+    """
+    try:
+        external_files.download_content(url, path, IMAGE_DOWNLOAD_TIMEOUT)
+        
+        # Validation post-téléchargement
+        if not path.exists() or path.stat().st_size == 0:
+            raise cv.Invalid(f"Fichier téléchargé vide ou inexistant: {url}")
+        
+        # Vérification rapide du type de contenu
+        with open(path, 'rb') as f:
+            header = f.read(512)
+            
+        # Vérification des signatures d'images connues
+        image_signatures = [
+            b'\xFF\xD8\xFF',  # JPEG
+            b'\x89PNG\r\n\x1a\n',  # PNG
+            b'GIF87a', b'GIF89a',  # GIF
+            b'BM',  # BMP
+            b'RIFF',  # WebP (partiel)
+            b'<svg',  # SVG
+        ]
+        
+        is_image = any(header.startswith(sig) for sig in image_signatures)
+        
+        # Vérification si c'est un fichier HTML d'erreur
+        header_str = header.decode('utf-8', errors='ignore').lower()
+        if any(marker in header_str for marker in ['<!doctype', '<html', '<head', 'error', '404', '403', '500']):
+            raise cv.Invalid(
+                f"Le serveur a retourné une page d'erreur au lieu de l'image. "
+                f"Vérifiez l'URL: {url}"
+            )
+        
+        if not is_image:
+            _LOGGER.warning(f"Le fichier téléchargé ne semble pas être une image standard: {url}")
+            # On continue quand même, PIL pourra peut-être l'ouvrir
+        
+        _LOGGER.info(f"Fichier téléchargé avec succès: {url} -> {path} ({path.stat().st_size} bytes)")
+        return str(path)
+        
+    except Exception as e:
+        _LOGGER.error(f"Erreur lors du téléchargement de {url}: {e}")
+        raise cv.Invalid(f"Impossible de télécharger l'image depuis {url}: {str(e)}")
 
 
 def download_gh_svg(value, source):
+    """
+    Télécharge un fichier SVG depuis GitHub avec validation
+    """
     mdi_id = value[CONF_ICON] if isinstance(value, dict) else value
     base_dir = external_files.compute_local_file_dir(DOMAIN) / source
     path = base_dir / f"{mdi_id}.svg"
 
     url = MDI_SOURCES[source] + mdi_id + ".svg"
-    return download_file(url, path)
+    
+    try:
+        return download_file(url, path)
+    except Exception as e:
+        raise cv.Invalid(f"Impossible de télécharger l'icône SVG '{mdi_id}' depuis {source}: {str(e)}")
 
 
 def download_image(value):
-    value = value[CONF_URL] if isinstance(value, dict) else value
-    return download_file(value, compute_local_image_path(value))
+    """
+    Télécharge une image depuis une URL avec gestion d'erreur améliorée
+    """
+    url = value[CONF_URL] if isinstance(value, dict) else value
+    
+    # Validation de l'URL
+    if not url or not isinstance(url, str):
+        raise cv.Invalid("URL d'image invalide")
+    
+    if not (url.startswith('http://') or url.startswith('https://')):
+        raise cv.Invalid(f"URL d'image invalide (doit commencer par http:// ou https://): {url}")
+    
+    try:
+        local_path = compute_local_image_path(value)
+        return download_file(url, local_path)
+    except Exception as e:
+        raise cv.Invalid(f"Erreur lors du téléchargement de l'image {url}: {str(e)}")
 
 
 def is_svg_file(file):
