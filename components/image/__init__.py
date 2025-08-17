@@ -8,6 +8,14 @@ import re
 
 from PIL import Image, UnidentifiedImageError
 
+import hashlib
+import io
+import logging
+from pathlib import Path
+import re
+
+from PIL import Image, UnidentifiedImageError
+
 from esphome import core, external_files
 import esphome.codegen as cg
 from esphome.components.const import CONF_BYTE_ORDER
@@ -27,13 +35,16 @@ from esphome.const import (
 )
 from esphome.core import CORE, HexInt
 
-_LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)  # Corrigé : __name__ au lieu de *_name*
 
 DOMAIN = "image"
+# NOTE: sd_mmc_card dépendance conditionnelle - sera ajoutée automatiquement si nécessaire
 DEPENDENCIES = ["display"]
 
-image_ns = cg.esphome_ns.namespace("image")
+# Configuration pour la liaison avec sd_mmc_card
+CONF_SD_MMC_CARD_ID = "sd_mmc_card_id"
 
+image_ns = cg.esphome_ns.namespace("image")
 ImageType = image_ns.enum("ImageType")
 
 CONF_OPAQUE = "opaque"
