@@ -424,7 +424,7 @@ def validate_cairosvg_installed():
 def validate_file_shorthand(value):
     # Si c'est un dictionnaire, on laisse TYPED_FILE_SCHEMA s'en occuper
     if isinstance(value, dict):
-        raise cv.Invalid("Dictionary should be handled by TYPED_FILE_SCHEMA")
+        return value  # Ne pas traiter les dictionnaires ici
     
     value = cv.string_strict(value)
     
@@ -446,6 +446,20 @@ def validate_file_shorthand(value):
     # Seulement pour les fichiers locaux
     value = cv.file_(value)
     return local_path(value)
+
+
+# Créer un validateur combiné personnalisé
+def validate_file_config(value):
+    """
+    Validateur principal pour la configuration des fichiers.
+    Gère à la fois les chaînes (shorthand) et les dictionnaires (typed schema).
+    """
+    if isinstance(value, dict):
+        # C'est un dictionnaire - utiliser TYPED_FILE_SCHEMA
+        return TYPED_FILE_SCHEMA(value)
+    else:
+        # C'est une chaîne - utiliser validate_file_shorthand
+        return validate_file_shorthand(value)
 
 
 def normalize_to_sd_path(path: str) -> str:
@@ -959,6 +973,20 @@ TYPED_FILE_SCHEMA = cv.typed_schema(
 )
 
 
+# Créer un validateur combiné personnalisé
+def validate_file_config(value):
+    """
+    Validateur principal pour la configuration des fichiers.
+    Gère à la fois les chaînes (shorthand) et les dictionnaires (typed schema).
+    """
+    if isinstance(value, dict):
+        # C'est un dictionnaire - utiliser TYPED_FILE_SCHEMA
+        return TYPED_FILE_SCHEMA(value)
+    else:
+        # C'est une chaîne - utiliser validate_file_shorthand
+        return validate_file_shorthand(value)
+
+
 def validate_transparency(choices=TRANSPARENCY_TYPES):
     def validate(value):
         if isinstance(value, bool):
@@ -1028,7 +1056,7 @@ def validate_settings(value):
 
 IMAGE_ID_SCHEMA = {
     cv.Required(CONF_ID): cv.declare_id(Image_),
-    cv.Required(CONF_FILE): cv.Any(TYPED_FILE_SCHEMA, validate_file_shorthand),  # TYPED_FILE_SCHEMA en premier !
+    cv.Required(CONF_FILE): validate_file_config,  # Utilise le validateur combiné
     cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
 }
 
