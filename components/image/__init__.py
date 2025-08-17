@@ -1024,7 +1024,7 @@ def validate_settings(value):
 
 IMAGE_ID_SCHEMA = {
     cv.Required(CONF_ID): cv.declare_id(Image_),
-    cv.Required(CONF_FILE): cv.Any(validate_file_shorthand, TYPED_FILE_SCHEMA),
+    cv.Required(CONF_FILE): cv.Any(TYPED_FILE_SCHEMA, validate_file_shorthand),  # TYPED_FILE_SCHEMA en premier !
     cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
 }
 
@@ -1215,7 +1215,6 @@ def detect_sd_mount_points():
                 continue
     
     return available_mounts
-
 
 
 
