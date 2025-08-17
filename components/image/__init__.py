@@ -950,6 +950,7 @@ def validate_type(image_types):
 
 
 def validate_settings(value):
+def validate_settings(value):
     """
     Validate the settings for a single image configuration.
     """
@@ -978,7 +979,12 @@ def validate_settings(value):
         
         # Pour les fichiers SD card, on évite la validation locale
         if is_sd_card_path(file_path):
-            _LOGGER.info(f"SD card image configured: {file_path}")
+            _LOGGER.info(f"SD card image configured: {file_path} - skipping local validation")
+            # Validation spécifique pour SD card
+            if CONF_RESIZE not in value:
+                raise cv.Invalid(
+                    f"SD card images require 'resize:' parameter. Image: {file_path}"
+                )
             return value
             
         file = Path(file)
