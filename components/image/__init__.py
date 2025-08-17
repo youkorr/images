@@ -422,6 +422,10 @@ def validate_cairosvg_installed():
 
 
 def validate_file_shorthand(value):
+    # Si c'est un dictionnaire, on laisse TYPED_FILE_SCHEMA s'en occuper
+    if isinstance(value, dict):
+        raise cv.Invalid("Dictionary should be handled by TYPED_FILE_SCHEMA")
+    
     value = cv.string_strict(value)
     
     # PREMIÈRE vérification - SD card AVANT toute autre validation
@@ -1024,7 +1028,7 @@ def validate_settings(value):
 
 IMAGE_ID_SCHEMA = {
     cv.Required(CONF_ID): cv.declare_id(Image_),
-    cv.Required(CONF_FILE): cv.Any(validate_file_shorthand, TYPED_FILE_SCHEMA),
+    cv.Required(CONF_FILE): cv.Any(TYPED_FILE_SCHEMA, validate_file_shorthand),  # TYPED_FILE_SCHEMA en premier !
     cv.GenerateID(CONF_RAW_DATA_ID): cv.declare_id(cg.uint8),
 }
 
